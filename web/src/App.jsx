@@ -19,12 +19,12 @@ import {
   WandSparkles,
 } from "lucide-react";
 
-const ROLES = ["Software Engineering", "AI / ML", "Data Analytics", "Consulting"];
+const ROLES = ["Software Development", "AI / ML", "Data Analytics", "Consulting"];
 const ROLE_SHORT = {
-  "Software Engineering": "Engineering",
+  "Software Development": "Development",
   "AI / ML": "AI / ML",
   "Data Analytics": "Analytics",
-  Consulting: "Consulting",
+  "Consulting": "Consulting",
 };
 
 const emptySelection = () => ({
@@ -41,7 +41,7 @@ function App() {
   const [base, setBase] = useState("HEAD~1");
   const [head, setHead] = useState("HEAD");
   const [prompt, setPrompt] = useState("");
-  const [roles, setRoles] = useState(["Software Engineering", "AI / ML"]);
+  const [roles, setRoles] = useState(["Software Development", "AI / ML"]);
   const [repo, setRepo] = useState(null);
   const [result, setResult] = useState(null);
   const [selection, setSelection] = useState(emptySelection);
