@@ -29,15 +29,26 @@ from .tools import TOOL_FUNCTIONS, TOOLS
 
 load_dotenv()
 
-client = OpenAI(
-    api_key=os.environ["LITELLM_MASTER_KEY"],
-    base_url="http://localhost:4000/v1",
-)
-
 MAX_STEPS = 6
 
 
-def run_agent(task: str, repo_path: str = ".") -> dict:
+def _client() -> OpenAI:
+    api_key = os.environ.get("LITELLM_MASTER_KEY")
+    if not api_key:
+        raise RuntimeError("LITELLM_MASTER_KEY is not configured.")
+    return OpenAI(
+        api_key=api_key,
+        base_url="http://localhost:4000/v1",
+    )
+
+
+def run_agent(
+    task: str,
+    repo_path: str = ".",
+    base_ref: str = "",
+    head_ref: str = "",
+) -> dict:
+    client = _client()
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": task},
@@ -60,7 +71,11 @@ def run_agent(task: str, repo_path: str = ".") -> dict:
         for tool_call in message.tool_calls:
             fn_name = tool_call.function.name
             fn_args = json.loads(tool_call.function.arguments)
-            fn_args.setdefault("repo_path", repo_path)
+            fn_args["repo_path"] = repo_path
+            if base_ref:
+                fn_args["base"] = base_ref
+            if head_ref:
+                fn_args["head"] = head_ref
 
             print(f"[step {step}] tool call: {fn_name}({fn_args})")
             fn = TOOL_FUNCTIONS[fn_name]

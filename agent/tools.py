@@ -13,6 +13,21 @@ up "which code do I run" purely from the name the model returned.
 
 import subprocess
 
+SENSITIVE_PATHSPECS = [
+    ":!.env",
+    ":!.env.*",
+    ":!**/.env",
+    ":!**/.env.*",
+    ":!*credentials*",
+    ":!**/*credentials*",
+    ":!*secret*",
+    ":!**/*secret*",
+    ":!*.pem",
+    ":!**/*.pem",
+    ":!*.key",
+    ":!**/*.key",
+]
+
 TOOLS = [
     {
         "type": "function",
@@ -49,23 +64,37 @@ TOOLS = [
 
 def list_changed_files(base: str, head: str, repo_path: str = ".") -> str:
     result = subprocess.run(
-        ["git", "-C", repo_path, "diff", "--name-only", f"{base}..{head}"],
+        [
+            "git", "-C", repo_path, "diff", "--name-only",
+            f"{base}..{head}", "--", ".", *SENSITIVE_PATHSPECS,
+        ],
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,
     )
+    if result.returncode:
+        raise RuntimeError(f"Could not list changed files: {result.stderr.strip()}")
     return result.stdout.strip() or "(no files changed)"
 
 
 def read_git_diff(base: str, head: str, repo_path: str = ".") -> str:
     result = subprocess.run(
-        ["git", "-C", repo_path, "diff", f"{base}..{head}"],
+        [
+            "git", "-C", repo_path, "diff", f"{base}..{head}", "--",
+            ".", *SENSITIVE_PATHSPECS,
+        ],
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,
     )
-    # cap length so one giant diff can't blow out the context window
-    return (result.stdout or "(no diff found)")[:8000]
+    if result.returncode:
+        raise RuntimeError(f"Could not read Git diff: {result.stderr.strip()}")
+    # Cap length so one giant diff can't blow out the context window.
+    if len(result.stdout) > 8000:
+        return result.stdout[:8000] + "\n[diff truncated at 8000 characters]"
+    return result.stdout or "(no diff found)"
 
 
 TOOL_FUNCTIONS = {
