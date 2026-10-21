@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -16,16 +16,18 @@ import {
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  TriangleAlert,
   WandSparkles,
 } from "lucide-react";
 
-const ROLES = ["Software Development", "AI / ML", "Data Analytics", "Consulting"];
-const ROLE_SHORT = {
-  "Software Development": "Development",
-  "AI / ML": "AI / ML",
-  "Data Analytics": "Analytics",
-  "Consulting": "Consulting",
-};
+const CLIENT_HEADER = "proofpoint-web";
+const DRAFT_KEY = "proofpoint.drafts.v1";
+const FALLBACK_ROLES = [
+  { id: "Software Development", short: "Development" },
+  { id: "AI / ML", short: "AI / ML" },
+  { id: "Data Analytics", short: "Analytics" },
+  { id: "Consulting", short: "Consulting" },
+];
 
 const emptySelection = () => ({
   resume: new Set(),
@@ -35,112 +37,157 @@ const emptySelection = () => ({
   post: false,
 });
 
+function serializeSelection(selection) {
+  return {
+    resume: [...selection.resume],
+    github: [...selection.github],
+    website: [...selection.website],
+    linkedin: [...selection.linkedin],
+    post: selection.post,
+  };
+}
+
+function deserializeSelection(raw) {
+  return {
+    resume: new Set(raw?.resume || []),
+    github: new Set(raw?.github || []),
+    website: new Set(raw?.website || []),
+    linkedin: new Set(raw?.linkedin || []),
+    post: Boolean(raw?.post),
+  };
+}
+
+function formatDetail(data, status) {
+  const detail = data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") return item.msg || item.message || "";
+      return "";
+    }).filter(Boolean);
+    if (messages.length) return messages.join(" ");
+  }
+  if (detail && typeof detail === "object") {
+    return detail.msg || detail.message || `Request failed (${status}).`;
+  }
+  return `Request failed (${status}).`;
+}
+
+async function api(path, { method = "GET", body } = {}) {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Proofpoint-Client": CLIENT_HEADER,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const raw = await response.text();
+  let data = null;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      if (!response.ok) throw new Error(raw.slice(0, 280) || `Request failed (${response.status}).`);
+      throw new Error("The server returned a non-JSON response.");
+    }
+  }
+  if (!response.ok) throw new Error(formatDetail(data, response.status));
+  return data;
+}
+
+function loadDraft() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 function App() {
-  const [repoPath, setRepoPath] = useState("");
-  const [websiteUrl, setWebsiteUrl] = useState("");
-  const [base, setBase] = useState("HEAD~1");
-  const [head, setHead] = useState("HEAD");
-  const [prompt, setPrompt] = useState("");
-  const [roles, setRoles] = useState(["Software Development", "AI / ML"]);
-  const [repo, setRepo] = useState(null);
-  const [result, setResult] = useState(null);
-  const [selection, setSelection] = useState(emptySelection);
-  const [checklist, setChecklist] = useState([]);
-  const [approved, setApproved] = useState(false);
+  const saved = useMemo(() => loadDraft(), []);
+  const [roleOptions, setRoleOptions] = useState(FALLBACK_ROLES);
+  const [publishers, setPublishers] = useState({ overleaf: false, github: false, linkedin: false });
+  const [repoPath, setRepoPath] = useState(saved?.repoPath || "");
+  const [websiteUrl, setWebsiteUrl] = useState(saved?.websiteUrl || "");
+  const [base, setBase] = useState(saved?.base || "ROOT");
+  const [head, setHead] = useState(saved?.head || "HEAD");
+  const [prompt, setPrompt] = useState(saved?.prompt || "");
+  const [roles, setRoles] = useState(saved?.roles || ["Software Development", "AI / ML"]);
+  const [repo, setRepo] = useState(saved?.repo || null);
+  const [result, setResult] = useState(saved?.result || null);
+  const [selection, setSelection] = useState(() => deserializeSelection(saved?.selection));
+  const [checklist, setChecklist] = useState(saved?.checklist || []);
+  const [approved, setApproved] = useState(Boolean(saved?.approved));
+  const [previewHash, setPreviewHash] = useState(saved?.previewHash || "");
+  const [approvedContent, setApprovedContent] = useState(saved?.approvedContent || null);
+  const [publishLog, setPublishLog] = useState(saved?.publishLog || []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(saved?.result ? "Restored saved drafts from this browser." : "");
+
+  const roleShort = useMemo(
+    () => Object.fromEntries(roleOptions.map((role) => [role.id, role.short])),
+    [roleOptions],
+  );
 
   const selectedCount = useMemo(() => (
     selection.resume.size + selection.github.size + selection.website.size + selection.linkedin.size
     + Number(selection.post)
   ), [selection]);
 
-  async function api(path, body) {
-    const response = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "Something went wrong.");
-    return data;
+  useEffect(() => {
+    api("/api/roles").then((data) => {
+      if (data?.roles?.length) setRoleOptions(data.roles);
+    }).catch(() => {});
+    api("/api/publishers").then(setPublishers).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const payload = {
+      repoPath,
+      websiteUrl,
+      base,
+      head,
+      prompt,
+      roles,
+      repo,
+      result,
+      selection: serializeSelection(selection),
+      checklist,
+      approved,
+      previewHash,
+      approvedContent,
+      publishLog,
+    };
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
+    } catch {
+      /* ignore quota */
+    }
+  }, [repoPath, websiteUrl, base, head, prompt, roles, repo, result, selection, checklist, approved, previewHash, approvedContent, publishLog]);
+
+  function confirmDiscard() {
+    if (!result) return true;
+    return window.confirm("This will discard the current drafts. Generations cost tokens. Continue?");
   }
 
-  async function connectRepo(event) {
-    event.preventDefault();
-    setError("");
-    setNotice("");
+  function clearDrafts() {
+    if (!confirmDiscard()) return;
     setResult(null);
-    setRepo(null);
     setApproved(false);
-    setBusy(true);
-    try {
-      const data = await api("/api/repo", { repo_path: repoPath });
-      setRepo(data);
-      setRepoPath(data.path);
-      setNotice("Repository connected. Nothing has been changed.");
-    } catch (reason) {
-      setError(reason.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function generate(event) {
-    event.preventDefault();
-    setError("");
+    setPreviewHash("");
+    setApprovedContent(null);
+    setSelection(emptySelection());
+    setChecklist([]);
+    setPublishLog([]);
     setNotice("");
-    setApproved(false);
-    setBusy(true);
-    try {
-      const data = await api("/api/generate", {
-        repo_path: repo?.path || repoPath,
-        base,
-        head,
-        prompt,
-        roles,
-      });
-      setResult({
-        ...data,
-        resume_bullets: data.resume_bullets.map((item, index) => ({
-          ...item,
-          id: `bullet-${index}`,
-        })),
-      });
-      setSelection(emptySelection());
-      setChecklist(data.checklist.map(() => false));
-      setNotice("Drafts ready. Review every claim and choose where each one belongs.");
-    } catch (reason) {
-      setError(reason.message);
-    } finally {
-      setBusy(false);
-    }
   }
 
-  function toggleRole(role) {
-    setRoles((current) => current.includes(role)
-      ? current.filter((item) => item !== role)
-      : [...current, role]);
-  }
-
-  function toggleTarget(target, id) {
-    setApproved(false);
-    setSelection((current) => {
-      const next = { ...current, [target]: new Set(current[target]) };
-      next[target].has(id) ? next[target].delete(id) : next[target].add(id);
-      return next;
-    });
-  }
-
-  function togglePost() {
-    setApproved(false);
-    setSelection((current) => ({ ...current, post: !current.post }));
-  }
-
-  function exportApproved() {
-    const approvedContent = {
-      approved_at: new Date().toISOString(),
+  function buildApproved() {
+    return {
       repo: result.repo,
       selected_resume_bullets: result.resume_bullets
         .filter((item) => selection.resume.has(item.id))
@@ -160,7 +207,121 @@ function App() {
       linkedin_summary: selection.linkedin.has("linkedin-summary") ? result.linkedin_summary : "",
       linkedin_post: selection.post ? result.linkedin_post : "",
     };
-    const blob = new Blob([JSON.stringify(approvedContent, null, 2)], {
+  }
+
+  async function connectRepo(event) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    setBusy(true);
+    try {
+      const data = await api("/api/repo", { method: "POST", body: { repo_path: repoPath } });
+      setRepo(data);
+      setRepoPath(data.path);
+      if (!base || base === "HEAD~1") setBase(data.suggested_base || "ROOT");
+      setNotice("Repository connected. Nothing has been changed.");
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generate(event) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    setApproved(false);
+    setPreviewHash("");
+    setApprovedContent(null);
+    setBusy(true);
+    try {
+      const data = await api("/api/generate", {
+        method: "POST",
+        body: {
+          repo_path: repo?.path || repoPath,
+          base,
+          head,
+          prompt,
+          roles,
+        },
+      });
+      setResult({
+        ...data,
+        resume_bullets: data.resume_bullets.map((item, index) => ({
+          ...item,
+          id: `bullet-${index}`,
+        })),
+      });
+      setSelection(emptySelection());
+      setChecklist(data.checklist.map(() => false));
+      setNotice("Drafts ready. Review every claim, edit wording, then choose where each one belongs.");
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleRole(role) {
+    setRoles((current) => current.includes(role)
+      ? current.filter((item) => item !== role)
+      : [...current, role]);
+  }
+
+  function markDirty() {
+    setApproved(false);
+    setPreviewHash("");
+    setApprovedContent(null);
+  }
+
+  function toggleTarget(target, id) {
+    markDirty();
+    setSelection((current) => {
+      const next = { ...current, [target]: new Set(current[target]) };
+      next[target].has(id) ? next[target].delete(id) : next[target].add(id);
+      return next;
+    });
+  }
+
+  function togglePost() {
+    markDirty();
+    setSelection((current) => ({ ...current, post: !current.post }));
+  }
+
+  function updateBullet(id, text) {
+    markDirty();
+    setResult((current) => ({
+      ...current,
+      resume_bullets: current.resume_bullets.map((item) => item.id === id ? { ...item, text } : item),
+    }));
+  }
+
+  function updateField(field, text) {
+    markDirty();
+    setResult((current) => ({ ...current, [field]: text }));
+  }
+
+  async function approveSelection() {
+    setError("");
+    setBusy(true);
+    try {
+      const content = buildApproved();
+      const data = await api("/api/approve", { method: "POST", body: content });
+      setApprovedContent(data.content);
+      setPreviewHash(data.preview_hash);
+      setApproved(true);
+      setNotice("Approved. Preview hash locked. Publishing will send this exact content.");
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function exportApproved() {
+    const payload = approvedContent || buildApproved();
+    const blob = new Blob([JSON.stringify({ preview_hash: previewHash, ...payload }, null, 2)], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);
@@ -169,6 +330,25 @@ function App() {
     anchor.download = "approved-career-content.json";
     anchor.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function publish(kind) {
+    if (!approvedContent || !previewHash) return;
+    setError("");
+    setBusy(true);
+    try {
+      const data = await api(`/api/publish/${kind}`, {
+        method: "POST",
+        body: { preview_hash: previewHash, content: approvedContent },
+      });
+      const label = data.url || data.id || data.file || data.status;
+      setPublishLog((current) => [...current, `${kind}: ${label}`]);
+      setNotice(`Published to ${kind}. ${label}`);
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   const bulletItems = result?.resume_bullets || [];
@@ -185,14 +365,17 @@ function App() {
         <div className="sidebar-label">WORKSPACE</div>
         <button className="nav-item active"><Sparkles size={17} /> Content studio</button>
         <button className="nav-item" onClick={() => {
-          setResult(null);
-          setApproved(false);
+          if (!result) {
+            setNotice("Generate drafts first, then you can review them here.");
+            return;
+          }
+          document.getElementById("review-title")?.scrollIntoView({ behavior: "smooth" });
         }}><FileText size={17} /> Review drafts</button>
         <div className="sidebar-bottom">
           <div className="privacy-card">
             <div className="privacy-icon"><LockKeyhole size={16} /></div>
             <strong>You’re in control</strong>
-            <p>Nothing gets published or changed unless you approve it.</p>
+            <p>Nothing gets published or changed unless you approve it. Drafts stay in this browser.</p>
           </div>
           <div className="user-row">
             <div className="avatar">S</div>
@@ -246,12 +429,12 @@ function App() {
               <div className="ref-field"><label htmlFor="base-ref">COMPARE FROM</label><input id="base-ref" value={base} onChange={(event) => setBase(event.target.value)} /></div>
               <ArrowRight className="ref-arrow" size={16} />
               <div className="ref-field"><label htmlFor="head-ref">TO</label><input id="head-ref" value={head} onChange={(event) => setHead(event.target.value)} /></div>
-              <span className="ref-hint">Git commits or refs</span>
+              <span className="ref-hint">ROOT = full project</span>
             </div>
             <div className="website-field">
               <label className="field-label" htmlFor="website-url">PERSONAL WEBSITE URL <span>OPTIONAL</span></label>
               <input id="website-url" type="url" value={websiteUrl} onChange={(event) => setWebsiteUrl(event.target.value)} placeholder="https://yourname.com" />
-              <p>Saved with your approved export only. No website connection is made.</p>
+              <p>Used when publishing website copy to GitHub Pages.</p>
             </div>
           </form>
 
@@ -264,16 +447,16 @@ function App() {
               </div>
             </div>
             <div className="role-grid">
-              {ROLES.map((role) => (
+              {roleOptions.map((role) => (
                 <button
                   type="button"
-                  key={role}
-                  onClick={() => toggleRole(role)}
-                  className={`role-chip ${roles.includes(role) ? "selected" : ""}`}
-                  aria-pressed={roles.includes(role)}
+                  key={role.id}
+                  onClick={() => toggleRole(role.id)}
+                  className={`role-chip ${roles.includes(role.id) ? "selected" : ""}`}
+                  aria-pressed={roles.includes(role.id)}
                 >
-                  <span className="role-check">{roles.includes(role) && <Check size={12} />}</span>
-                  {ROLE_SHORT[role]}
+                  <span className="role-check">{roles.includes(role.id) && <Check size={12} />}</span>
+                  {role.short}
                 </button>
               ))}
             </div>
@@ -288,7 +471,7 @@ function App() {
               required
             />
             <div className="form-footer">
-              <span><ShieldCheck size={15} /> Only the selected Git diff is sent to LiteLLM for drafting.</span>
+              <span><ShieldCheck size={15} /> Secrets are redacted before the diff is sent to LiteLLM.</span>
               <button className="primary-button" disabled={busy || !repo || !roles.length}>
                 {busy ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}
                 {busy ? "Working on your drafts…" : "Generate drafts"}
@@ -306,42 +489,54 @@ function App() {
                 <div>
                   <div className="eyebrow"><span className="eyebrow-line" /> YOUR DRAFTS</div>
                   <h2 id="review-title">Pick what goes where.</h2>
-                  <p>Every item starts unselected. Choose a destination for each one.</p>
+                  <p>Edit wording, then choose a destination. Drafts are saved in this browser.</p>
                 </div>
-                <button className="text-button" onClick={() => {
-                  setResult(null);
-                  setApproved(false);
-                }}><RefreshCw size={15} /> Start over</button>
+                <button className="text-button" onClick={clearDrafts}><RefreshCw size={15} /> Start over</button>
               </div>
               <div className="review-meta">
                 <span><Github size={15} /> {result.repo.path}</span>
                 <span>{result.base} <ArrowRight size={13} /> {result.head}</span>
               </div>
 
-              <div className="destination-title"><div className="step-number">03</div><div><h3>Career stories</h3><p>Overleaf-ready resume text. Select each destination independently.</p></div></div>
+              {result.verification?.length > 0 && (
+                <div className="verify-card">
+                  <div className="verify-heading"><TriangleAlert size={16} /><strong>Deterministic claim check</strong></div>
+                  <p>These technologies or numbers were not found in the repository evidence.</p>
+                  {result.verification.map((flag, index) => (
+                    <p key={`${flag.claim}-${index}`}><strong>{flag.claim}</strong> — {flag.reason}</p>
+                  ))}
+                </div>
+              )}
+
+              <div className="destination-title"><div className="step-number">03</div><div><h3>Career stories</h3><p>Overleaf-ready resume text. Edit freely, then select each destination independently.</p></div></div>
               <div className="bullet-list">
                 {bulletItems.length ? bulletItems.map((item) => (
                   <article className="bullet-card" key={item.id}>
                     <div className="bullet-body">
                       <span className="role-tag">{item.role}</span>
-                      <p>{item.text}</p>
+                      <textarea
+                        className="bullet-edit"
+                        value={item.text}
+                        onChange={(event) => updateBullet(item.id, event.target.value)}
+                        rows={3}
+                      />
                     </div>
                     <div className="target-row">
-                      <TargetToggle active={selection.resume.has(item.id)} onClick={() => toggleTarget("resume", item.id)}><FileText size={14} /> Resume · {ROLE_SHORT[item.role] || item.role}</TargetToggle>
+                      <TargetToggle active={selection.resume.has(item.id)} onClick={() => toggleTarget("resume", item.id)}><FileText size={14} /> Resume · {roleShort[item.role] || item.role}</TargetToggle>
                       <TargetToggle active={selection.github.has(item.id)} onClick={() => toggleTarget("github", item.id)}><Github size={14} /> GitHub</TargetToggle>
                       <TargetToggle active={selection.website.has(item.id)} onClick={() => toggleTarget("website", item.id)}><FileText size={14} /> Website</TargetToggle>
                       <TargetToggle active={selection.linkedin.has(item.id)} onClick={() => toggleTarget("linkedin", item.id)}><Linkedin size={14} /> LinkedIn</TargetToggle>
                     </div>
                   </article>
-                )) : <div className="empty-state">No resume bullets were supported by this diff. The summaries below may still contain useful drafts.</div>}
+                )) : <div className="empty-state">No resume bullets were supported by this evidence. The summaries below may still contain useful drafts.</div>}
               </div>
 
-              <div className="destination-title other-destinations"><div className="step-number">04</div><div><h3>Profile &amp; post drafts</h3><p>Nothing is sent to GitHub, your website, LinkedIn, or Overleaf from here.</p></div></div>
+              <div className="destination-title other-destinations"><div className="step-number">04</div><div><h3>Profile &amp; post drafts</h3><p>Approve once, then publish the locked preview to Overleaf, GitHub Pages, or LinkedIn.</p></div></div>
               <div className="artifact-grid">
-                <ArtifactCard icon={<Github size={16} />} title="GitHub project summary" text={result.github_summary} empty="No summary generated." checked={selection.github.has("github-summary")} onToggle={() => toggleTarget("github", "github-summary")} target="Use for GitHub" />
-                <ArtifactCard icon={<FileText size={16} />} title="Personal website copy" text={result.website_copy} empty="No website copy generated." checked={selection.website.has("website-copy")} onToggle={() => toggleTarget("website", "website-copy")} target="Use for website" />
-                <ArtifactCard icon={<Linkedin size={16} />} title="LinkedIn profile snippet" text={result.linkedin_summary} empty="No summary generated." checked={selection.linkedin.has("linkedin-summary")} onToggle={() => toggleTarget("linkedin", "linkedin-summary")} target="Use for LinkedIn" />
-                <ArtifactCard icon={<Linkedin size={16} />} title="LinkedIn post draft" text={result.linkedin_post} empty="No post draft generated." checked={selection.post} onToggle={togglePost} target="Select post draft" />
+                <ArtifactCard icon={<Github size={16} />} title="GitHub project summary" text={result.github_summary} empty="No summary generated." checked={selection.github.has("github-summary")} onToggle={() => toggleTarget("github", "github-summary")} onChange={(value) => updateField("github_summary", value)} target="Use for GitHub" />
+                <ArtifactCard icon={<FileText size={16} />} title="Personal website copy" text={result.website_copy} empty="No website copy generated." checked={selection.website.has("website-copy")} onToggle={() => toggleTarget("website", "website-copy")} onChange={(value) => updateField("website_copy", value)} target="Use for website" />
+                <ArtifactCard icon={<Linkedin size={16} />} title="LinkedIn profile snippet" text={result.linkedin_summary} empty="No summary generated." checked={selection.linkedin.has("linkedin-summary")} onToggle={() => toggleTarget("linkedin", "linkedin-summary")} onChange={(value) => updateField("linkedin_summary", value)} target="Use for LinkedIn" />
+                <ArtifactCard icon={<Linkedin size={16} />} title="LinkedIn post draft" text={result.linkedin_post} empty="No post draft generated." checked={selection.post} onToggle={togglePost} onChange={(value) => updateField("linkedin_post", value)} target="Select post draft" />
               </div>
 
               <div className="review-bottom">
@@ -350,7 +545,7 @@ function App() {
                   {result.checklist.map((item, index) => (
                     <label className="checklist-item" key={`${index}-${item}`}>
                       <input type="checkbox" checked={Boolean(checklist[index])} onChange={() => {
-                        setApproved(false);
+                        markDirty();
                         setChecklist((current) => current.map((value, i) => i === index ? !value : value));
                       }} />
                       <span className="custom-check">{checklist[index] && <Check size={12} />}</span>
@@ -361,15 +556,24 @@ function App() {
                 </div>
                 <div className="approval-card">
                   <div className="approval-icon"><LockKeyhole size={17} /></div>
-                  <div className="approval-copy"><strong>Nothing moves without you.</strong><p>Approval only prepares a local JSON export. No profile, resume, repository, or post is updated.</p></div>
-                  <button className="approve-button" disabled={!canApprove} onClick={() => {
-                    setApproved(true);
-                    setNotice("Approved for local export only. Nothing has been published or changed.");
-                  }}>
+                  <div className="approval-copy"><strong>Nothing moves without you.</strong><p>Approval locks a preview hash. Publishers refuse anything that no longer matches.</p></div>
+                  <button className="approve-button" disabled={!canApprove || busy} onClick={approveSelection}>
                     <CheckCircle2 size={16} /> Approve {selectedCount} selected
                   </button>
                   {approved && <button className="export-button" onClick={exportApproved}><ArrowDownToLine size={16} /> Download approved selection</button>}
+                  {approved && (
+                    <div className="publish-row">
+                      <button className="export-button" disabled={busy || !publishers.overleaf} onClick={() => publish("overleaf")}>Publish to Overleaf</button>
+                      <button className="export-button" disabled={busy || !publishers.github} onClick={() => publish("github")}>Open GitHub Pages PR</button>
+                      <button className="export-button" disabled={busy || !publishers.linkedin || !approvedContent?.linkedin_post} onClick={() => publish("linkedin")}>Post to LinkedIn</button>
+                    </div>
+                  )}
+                  {approved && previewHash && <p className="hash-line">Preview hash {previewHash.slice(0, 16)}…</p>}
+                  {publishLog.map((item) => <p className="hash-line" key={item}>{item}</p>)}
                   {!canApprove && <span className="approval-hint">{selectedCount === 0 ? "Select at least one item and verify the checklist." : "Verify every checklist item to approve."}</span>}
+                  {approved && !publishers.overleaf && !publishers.github && !publishers.linkedin && (
+                    <span className="approval-hint">Set OVERLEAF_GIT_URL, GITHUB_TOKEN + GITHUB_PAGES_REPO, or LINKEDIN_ACCESS_TOKEN + LINKEDIN_PERSON_URN to enable publishing.</span>
+                  )}
                 </div>
               </div>
             </section>
@@ -390,11 +594,17 @@ function TargetToggle({ active, disabled = false, onClick, children }) {
   );
 }
 
-function ArtifactCard({ icon, title, text, empty, checked, onToggle, target }) {
+function ArtifactCard({ icon, title, text, empty, checked, onToggle, onChange, target }) {
   return (
     <article className="artifact-card">
       <div className="artifact-title">{icon}<strong>{title}</strong></div>
-      <p className={text ? "" : "muted"}>{text || empty}</p>
+      <textarea
+        className="artifact-edit"
+        value={text}
+        placeholder={empty}
+        onChange={(event) => onChange(event.target.value)}
+        rows={6}
+      />
       <TargetToggle active={checked} disabled={!text} onClick={onToggle}><Plus size={14} /> {target}</TargetToggle>
     </article>
   );

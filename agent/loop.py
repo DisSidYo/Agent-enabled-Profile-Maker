@@ -24,12 +24,14 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from .jsonutil import parse_model_json
+from .limits import TOOL_RESULT_LIMIT
 from .prompts import SYSTEM_PROMPT
 from .tools import TOOL_FUNCTIONS, TOOLS
 
 load_dotenv()
 
-MAX_STEPS = 6
+MAX_STEPS = 8
 
 
 def _client() -> OpenAI:
@@ -40,6 +42,35 @@ def _client() -> OpenAI:
         api_key=api_key,
         base_url="http://localhost:4000/v1",
     )
+
+
+def _looks_like_json(content: str | None) -> bool:
+    if not isinstance(content, str) or not content.strip():
+        return False
+    try:
+        parse_model_json(content)
+        return True
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+
+def _finalize_json(client: OpenAI, messages: list) -> str | None:
+    payload = {
+        "model": "primary",
+        "messages": messages + [{
+            "role": "user",
+            "content": "Return only the final JSON object with the required keys. No markdown.",
+        }],
+        "metadata": {"trace_name": "resume_bullet_agent_json"},
+    }
+    try:
+        response = client.chat.completions.create(
+            **payload,
+            response_format={"type": "json_object"},
+        )
+    except Exception:
+        response = client.chat.completions.create(**payload)
+    return response.choices[0].message.content
 
 
 def run_agent(
@@ -65,12 +96,19 @@ def run_agent(
         messages.append(message.model_dump(exclude_none=True))
 
         if not message.tool_calls:
-            # no more tools requested -> model considers itself done
-            return {"result": message.content, "steps_taken": step + 1}
+            if _looks_like_json(message.content):
+                return {"result": message.content, "steps_taken": step + 1}
+            finalized = _finalize_json(client, messages)
+            return {"result": finalized, "steps_taken": step + 1}
 
         for tool_call in message.tool_calls:
             fn_name = tool_call.function.name
-            fn_args = json.loads(tool_call.function.arguments)
+            try:
+                fn_args = json.loads(tool_call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                fn_args = {}
+            if not isinstance(fn_args, dict):
+                fn_args = {}
             fn_args["repo_path"] = repo_path
             if base_ref:
                 fn_args["base"] = base_ref
@@ -78,24 +116,30 @@ def run_agent(
                 fn_args["head"] = head_ref
 
             print(f"[step {step}] tool call: {fn_name}({fn_args})")
-            fn = TOOL_FUNCTIONS[fn_name]
-            result = fn(**fn_args)
+            fn = TOOL_FUNCTIONS.get(fn_name)
+            if fn is None:
+                result = f"Unknown tool: {fn_name}"
+            else:
+                result = fn(**fn_args)
 
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": str(result)[:4000],
+                    "content": str(result)[:TOOL_RESULT_LIMIT],
                 }
             )
 
+    finalized = _finalize_json(client, messages)
+    if finalized:
+        return {"result": finalized, "steps_taken": MAX_STEPS}
     return {"result": None, "error": f"hit MAX_STEPS={MAX_STEPS} without a final answer"}
 
 
 if __name__ == "__main__":
     import sys
 
-    base = sys.argv[1] if len(sys.argv) > 1 else "HEAD~1"
+    base = sys.argv[1] if len(sys.argv) > 1 else "ROOT"
     head = sys.argv[2] if len(sys.argv) > 2 else "HEAD"
 
     task = (

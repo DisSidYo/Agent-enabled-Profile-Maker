@@ -6,3 +6,5 @@ venv/
 *.egg-info/
 .DS_Store
 langfuse-local/
+web/node_modules/
+web/dist/
